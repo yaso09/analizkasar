@@ -1308,17 +1308,29 @@ def build_clarification_prompt(
         )
 
     system = f"""\
-Sen kıdemli bir akademik araştırma editörüsün.
-Sana {kaynak_tanimi}
-İçerikleri okuyacak ve ardından yazılacak akademik final raporu için eksik gördüğün
-bilgileri kullanıcıya sorular hâlinde ileteceksin.
+Sen bir araştırma raporu yazım asistanısın.
+Görevin: kullanıcının {n_sources} kaynaktan derlenen içeriği üzerinden
+bir akademik rapor yazılmasına yardımcı olmak.
+
+İçerikleri okuduktan sonra, raporu DAHA İYİ yazmak için kullanıcının
+TERCİHLERİNİ ve NİYETİNİ anlamaya yönelik sorular sor.
+
+SORULMASI UYGUN SORU TİPLERİ (bunlarla sınırlı kalma, ama bunlar iyi örnekler):
+- Raporun hedef kitlesi kim? (akademisyen, sektör uzmanı, genel okuyucu...)
+- Özellikle vurgulanmasını istediğin bir konu veya perspektif var mı?
+- Raporun tonu nasıl olsun? (teknik, açıklayıcı, eleştirel...)
+- Belirli bir kullanım amacı var mı? (yayın, sunum, iç rapor...)
+- Kaynaklar arasında öncelik verilmesini istediğin var mı?
+
+KESINLIKLE SORMA:
+- Kaynaklarda zaten mevcut olan teknik/akademik bilgileri
+- Araştırma sorularını veya hipotezleri (bunları sen çıkaracaksın)
+- İçeriklerin doğruluğunu teyit eden sorular
 
 KURALLAR:
-- Yalnızca gerçekten belirsiz veya eksik olan noktaları sor; içerikten çıkarılabilecek
-  bilgileri sorma.
-- Soru sayısı en fazla 7 olmalı; önemine göre sırala (en kritik önce).
-- Her sorunun neden sorulduğunu kısaca açıkla (1 cümle).
-- Akademik, nesnel ton kullan.
+- Soru sayısı en fazla 4 olmalı; kısa ve net sorular sor.
+- Her sorunun amacını bir cümleyle açıkla.
+- Eğer içerik zaten yeterince yönlendirici ise soru sormana gerek yok.
 
 YANIT FORMATI — sadece geçerli JSON, başka hiçbir şey:
 {{"questions": [{{"id": 1, "question": "...", "why": "..."}}]}}
@@ -1330,8 +1342,8 @@ Rapor dili: {language}\
 
     content_label = "RAG chunk'ları" if rag_mode else f"{n_batches} batch analizi"
     user = f"""\
-Aşağıdaki {content_label}ni oku ve final akademik raporu en iyi şekilde
-yazabilmek için kullanıcıya sormak istediğin soruları belirle.
+Aşağıdaki {content_label}ni oku ve raporu kullanıcının ihtiyacına göre
+şekillendirmek için gerekli TERCİH ve NİYET sorularını belirle.
 
 ---
 {all_outputs}\
