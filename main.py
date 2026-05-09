@@ -1252,35 +1252,38 @@ Makale sonundaki ## Kaynakça bölümünde kayıtlı tüm kaynaklar şu formatta
 [N] Başlık veya kısa açıklama. URL. (Erişim tarihi: {__import__('datetime').date.today()})
 Yalnızca metinde atıf yapılan kaynaklar listelenir; gereksiz kaynak eklenmez.
 
-Rapor dili: {language}
-
-YANIT FORMATI — KESİNLİKLE UYULMALI:
-Yanıtını yalnızca geçerli bir JSON nesnesi olarak döndür.
-JSON dışında hiçbir şey yazma; açıklama, giriş veya ``` bloğu KULLANMA.
-
-Başarılı rapor:
-{{"is_final_report": true, "report": "<Markdown makale>"}}
-
-Tamamlanamama durumu:
-{{"is_final_report": false, "message": "<neden>", "needed_input": "<kullanıcıdan ne istiyorsun>"}}\
+Rapor dili: {language}\
 """
 
+    json_footer = (
+        "\n\n" +
+        "ÇIKTI FORMATI — BUNU KESINLIKLE UY, İSTİSNASIZ:\r\n"
+        "Yanıtının ilk karakteri { olmalı, son karakteri } olmalı.\r\n"
+        "Önce veya sonra HİÇBİR metin, açıklama veya ``` bloğu YAZMA.\r\n"
+        "Yalnızca şu iki JSON formundan biri:\r\n"
+        '  Başarılı: {"is_final_report": true, "report": "# Araştırma Raporu\\n..."}\r\n'
+        '  Tamamlanamama: {"is_final_report": false, "message": "...", "needed_input": "..."}\r\n'
+    )
     # RAG modunda all_outputs boştur; user prompt buna göre şekillendirilir.
     if all_outputs.strip():
-        user = f"""\
-{n_batches} araştırma döngüsünden elde edilmiş analizler ({n_sources} kaynak, {n_chars} karakter).
-Bu analizleri yukarıdaki yapıda, tam atıflı akademik bir makaleye dönüştür.
-{registry_block}{qa_section}{rag_section}
----
-{all_outputs}\
-"""
+        user = (
+            f"{n_batches} araştırma döngüsünden elde edilmiş analizler"
+            f" ({n_sources} kaynak, {n_chars} karakter).\n"
+            f"Bu analizleri yukarıdaki yapıda, tam atıflı akademik bir makaleye dönüştür.\n"
+            f"{registry_block}{qa_section}{rag_section}"
+            f"---\n{all_outputs}"
+            + json_footer
+        )
     else:
         # RAG modu: tüm içerik RAG chunk'larından geliyor
-        user = f"""\
-{n_sources} web kaynağından toplanan içerik RAG deposuna yüklendi ({n_chars} karakter).
-Aşağıdaki RAG chunk'larını kullanarak yukarıdaki yapıda, tam atıflı akademik bir makale yaz.
-{registry_block}{qa_section}{rag_section}\
-"""
+        user = (
+            f"{n_sources} web kaynağından toplanan içerik RAG deposuna yüklendi"
+            f" ({n_chars} karakter).\n"
+            f"Aşağıdaki RAG chunk'larını kullanarak yukarıdaki yapıda,"
+            f" tam atıflı akademik bir makale yaz.\n"
+            f"{registry_block}{qa_section}{rag_section}"
+            + json_footer
+        )
     return system, user
 
 
