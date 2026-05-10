@@ -51,7 +51,7 @@ console = Console(highlight=False)
 # ─────────────────────────────────────────────────────────────────────────────
 # BACKEND REGISTRY
 # ─────────────────────────────────────────────────────────────────────────────
-BACKENDS = ["ollama", "openai", "anthropic", "groq", "lmstudio"]
+BACKENDS = ["ollama", "openai", "anthropic", "groq", "lmstudio", "mistral"]
 
 DEFAULT_MODELS = {
     "ollama":    "gemma3:12b",
@@ -59,6 +59,7 @@ DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-5",
     "groq":      "llama-3.3-70b-versatile",
     "lmstudio":  "local-model",
+    "mistral":   "mistral-large-latest",
 }
 
 BACKEND_COLORS = {
@@ -67,6 +68,7 @@ BACKEND_COLORS = {
     "anthropic": "bright_magenta",
     "groq":      "bright_yellow",
     "lmstudio":  "bright_blue",
+    "mistral":   "orange1",
 }
 
 OUTPUT_FORMATS = ["pdf", "docx", "md", "txt", "json"]
@@ -214,6 +216,184 @@ class Stats:
             t.add_row(k, v)
         console.print()
         console.print(t)
+
+
+@dataclass
+class UserIntent:
+    """
+    Kullanıcının araştırma niyetini yapısal olarak tutar.
+    Tüm LLM çağrılarına enjekte edilerek modelin odağını sabitler.
+    """
+    topic:       str   # Araştırma konusu / hedef
+    output_type: str   # Çıktı türü (akademik makale, teknik rapor vb.)
+    audience:    str   # Hedef kitle
+    focus:       str   # Odak noktaları / öncelikler
+    constraints: str   # Kaçınılması gerekenler / kısıtlar
+
+    def is_empty(self) -> bool:
+        return not self.topic.strip()
+
+    def to_prompt_block(self) -> str:
+        """LLM prompt'una eklenecek kullanıcı niyet bloğu üretir."""
+        lines = [
+            "KULLANICI NİYETİ (tüm çıktı bu hedefi karşılamak için üretilir):",
+            f"  Konu / Hedef   : {self.topic}",
+            f"  Çıktı Türü     : {self.output_type}",
+        ]
+        if self.audience.strip():
+            lines.append(f"  Hedef Kitle    : {self.audience}")
+        if self.focus.strip():
+            lines.append(f"  Odak Noktaları : {self.focus}")
+        if self.constraints.strip():
+            lines.append(f"  Kısıtlar       : {self.constraints}")
+        return "\n".join(lines)
+
+
+_OUTPUT_TYPES = [
+    ("Akademik Makale",   "Hakemli dergi standardında, bölümlü, atıflı akademik metin"),
+    ("Teknik Rapor",      "Mühendislik odaklı, mimari ve implementasyon detaylarıyla"),
+    ("Yönetici Özeti",    "Karar verici için kısa, bulgular ve öneriler ağırlıklı"),
+    ("Kapsamlı Analiz",   "Derinlemesine inceleme, karşılaştırma ve eleştirel değerlendirme"),
+    ("Literatür Taraması","Kaynak karşılaştırması ve alan haritası odaklı"),
+]
+
+
+def collect_user_intent(preset_topic: str = "") -> UserIntent:
+    """
+    Kullanıcıdan araştırma niyetini interaktif olarak toplar.
+    preset_topic verilmişse konu sorusu atlanır (--prompt bayrağı için).
+    """
+    console.print()
+    console.print(Panel(
+        "[bold bright_white]Araştırma ajanı başlamadan önce ne istediğini anlayalım.[/bold bright_white]\n"
+        "[dim]Boş bırakabileceğin alanlar var — sadece Enter'a basarak geçebilirsin.[/dim]",
+        title="[bold bright_cyan]🎯 Araştırma Niyeti[/bold bright_cyan]",
+        border_style="bright_cyan",
+        padding=(0, 2),
+    ))
+    console.print()
+
+    # ── 1. Konu ──────────────────────────────────────────────────────────────
+    if preset_topic:
+        topic = preset_topic.strip()
+        console.print(
+            f"  [bright_cyan]Konu:[/bright_cyan] [bright_white]{topic}[/bright_white] "
+            f"[dim](--prompt ile belirlendi)[/dim]"
+        )
+        console.print()
+    else:
+        console.print(Panel(
+            "[bold]Bu araştırmadan ne elde etmek istiyorsun?[/bold]\n"
+            "[dim]Örnek: \"Transformer modelleri ile protein yapı tahmini\", "
+            "\"GPT-4 ve Claude'un kod üretme karşılaştırması\"[/dim]",
+            title="[bold bright_yellow]1 / 5  Araştırma Konusu[/bold bright_yellow]",
+            border_style="bright_yellow",
+            padding=(0, 2),
+        ))
+        try:
+            topic = input("  ✏  Konu / Hedef: ").strip()
+        except EOFError:
+            topic = ""
+        if not topic:
+            topic = "Genel araştırma"
+        console.print()
+
+    # ── 2. Çıktı Türü ────────────────────────────────────────────────────────
+    console.print(Panel(
+        "[bold]Sonuç nasıl bir belge olsun?[/bold]\n\n"
+        + "\n".join(
+            f"  [bright_yellow]{i+1}[/bright_yellow]. [bright_white]{name}[/bright_white]"
+            f"  [dim]— {desc}[/dim]"
+            for i, (name, desc) in enumerate(_OUTPUT_TYPES)
+        ),
+        title="[bold bright_yellow]2 / 5  Çıktı Türü[/bold bright_yellow]",
+        border_style="bright_yellow",
+        padding=(0, 2),
+    ))
+    try:
+        choice_raw = input(f"  ✏  Seçim (1–{len(_OUTPUT_TYPES)}, varsayılan 1): ").strip()
+        choice_idx = int(choice_raw) - 1 if choice_raw.isdigit() else 0
+        choice_idx = max(0, min(choice_idx, len(_OUTPUT_TYPES) - 1))
+    except (EOFError, ValueError):
+        choice_idx = 0
+    output_type = _OUTPUT_TYPES[choice_idx][0]
+    console.print(f"  [bright_green]✓[/bright_green] {output_type}")
+    console.print()
+
+    # ── 3. Hedef Kitle ───────────────────────────────────────────────────────
+    console.print(Panel(
+        "[bold]Bu raporu kim okuyacak?[/bold]\n"
+        "[dim]Örnek: \"Doktora öğrencileri\", \"Yazılım mühendisleri\", "
+        "\"C-level yöneticiler\", \"Genel kitle\"[/dim]",
+        title="[bold bright_yellow]3 / 5  Hedef Kitle[/bold bright_yellow]",
+        border_style="bright_yellow",
+        padding=(0, 2),
+    ))
+    try:
+        audience = input("  ✏  Hedef kitle (boş bırakabilirsin): ").strip()
+    except EOFError:
+        audience = ""
+    console.print()
+
+    # ── 4. Odak Noktaları ────────────────────────────────────────────────────
+    console.print(Panel(
+        "[bold]Özellikle vurgulanmasını istediğin konular var mı?[/bold]\n"
+        "[dim]Örnek: \"Performans karşılaştırması ve benchmark sonuçları\", "
+        "\"Güvenlik açıkları\", \"Maliyet analizi\"[/dim]",
+        title="[bold bright_yellow]4 / 5  Odak Noktaları[/bold bright_yellow]",
+        border_style="bright_yellow",
+        padding=(0, 2),
+    ))
+    try:
+        focus = input("  ✏  Odak noktaları (boş bırakabilirsin): ").strip()
+    except EOFError:
+        focus = ""
+    console.print()
+
+    # ── 5. Kısıtlar ──────────────────────────────────────────────────────────
+    console.print(Panel(
+        "[bold]Raporda olmamasını istediğin bir şey var mı?[/bold]\n"
+        "[dim]Örnek: \"Ticari ürün reklamı yapılmasın\", "
+        "\"Python dışı kod örneği verilmesin\", \"Spekülasyon yapılmasın\"[/dim]",
+        title="[bold bright_yellow]5 / 5  Kısıtlar[/bold bright_yellow]",
+        border_style="bright_yellow",
+        padding=(0, 2),
+    ))
+    try:
+        constraints = input("  ✏  Kısıtlar (boş bırakabilirsin): ").strip()
+    except EOFError:
+        constraints = ""
+    console.print()
+
+    intent = UserIntent(
+        topic=topic,
+        output_type=output_type,
+        audience=audience,
+        focus=focus,
+        constraints=constraints,
+    )
+
+    # ── Özet paneli ──────────────────────────────────────────────────────────
+    summary_lines = [
+        f"[bright_cyan]Konu:[/bright_cyan]        {intent.topic}",
+        f"[bright_cyan]Çıktı Türü:[/bright_cyan]  {intent.output_type}",
+    ]
+    if intent.audience:
+        summary_lines.append(f"[bright_cyan]Kitle:[/bright_cyan]       {intent.audience}")
+    if intent.focus:
+        summary_lines.append(f"[bright_cyan]Odak:[/bright_cyan]        {intent.focus}")
+    if intent.constraints:
+        summary_lines.append(f"[bright_cyan]Kısıtlar:[/bright_cyan]    {intent.constraints}")
+
+    console.print(Panel(
+        "\n".join(summary_lines),
+        title="[bold bright_green]✅ Araştırma Niyeti Kaydedildi[/bold bright_green]",
+        border_style="bright_green",
+        padding=(0, 2),
+    ))
+    console.print()
+
+    return intent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1056,7 +1236,13 @@ def save_json(data, path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Tüm çağrılarda ortak sistem direktifleri
-_CORE_RULES = """\
+def _make_core_rules(intent: "UserIntent | None" = None) -> str:
+    """_CORE_RULES metnini üretir; varsa UserIntent niyet bloğunu başa ekler."""
+    intent_block = ""
+    if intent and not intent.is_empty():
+        intent_block = intent.to_prompt_block() + "\n\n"
+
+    return intent_block + """\
 GÖREV PROTOKOLÜ (hiçbir koşulda çiğnenemez):
 - Bu bir analiz görevi; sohbet, karşılama, teşekkür veya özür YOK.
 - Soru sorma, ek bilgi isteme, seçenek sunma YOK.
@@ -1083,12 +1269,12 @@ Aşağıdaki kurallar mutlaktır ve tek istisnası yoktur.
 2. MADDE LİSTESİ YASAĞI
    Tire (-), yıldız (*), ok (→ ► •) veya numaralandırma ile başlayan satır
    KESİNLİKLE YAZILMAZ. Listelenmesi gereken unsurlar cümle içine entegre edilir.
-   Örnek (yanlış): "Üç temel bileşen vardır:\n- Algı\n- Bellek\n- Eylem"
-   Örnek (doğru): "Sistem üç temel bileşen üzerine inşa edilmiştir: algı katmanı
-   ortamdan girdi alırken, bellek modülü geçmiş gözlemleri saklar ve eylem birimi
-   çıktıyı üretir."
+   Örnek (yanlış): "Üç temel bileşen vardır:\\n- Algı\\n- Bellek\\n- Eylem"
+   Örnek (doğru): "Sistem algı, bellek ve eylem bileşenleri üzerine inşa edilmiştir;
+   algı katmanı ortamdan girdi alırken, bellek modülü geçmiş gözlemleri saklar ve
+   eylem birimi çıktıyı üretir."
 
-3. EMOJİ VE GÖRSEl SİMGE YASAĞI
+3. EMOJİ VE GÖRSEL SİMGE YASAĞI
    🧠 ✅ ❌ 🚀 📌 gibi simgeler hiçbir koşulda kullanılmaz.
 
 4. TABLO KULLANIMI
@@ -1111,7 +1297,8 @@ Aşağıdaki kurallar mutlaktır ve tek istisnası yoktur.
 
 def build_analysis_prompt(chunk: str, language: str,
                           rag_context: str = "",
-                          source_index: dict[str, int] | None = None) -> tuple[str, str]:
+                          source_index: dict[str, int] | None = None,
+                          intent: "UserIntent | None" = None) -> tuple[str, str]:
     rag_section = ""
     if rag_context:
         rag_section = f"""
@@ -1141,7 +1328,7 @@ Kaynak indeksinde olmayan bir bilgi metne eklenmez.
 Sen otonom çalışan bir araştırma yapay zekâsısın (Research Agent).
 Görevin: verilen web kaynaklarını analiz edip yapılandırılmış akademik metin üretmek.
 
-{_CORE_RULES}
+{_make_core_rules(intent)}
 
 ÇIKTI YAPISI (bu sıraya kesinlikle uy; her bölüm paragraf olarak yazılır):
 
@@ -1186,7 +1373,8 @@ def build_final_prompt(n_batches: int, n_sources: int, n_chars: str,
                        all_outputs: str, language: str,
                        rag_context: str = "",
                        user_answers: str = "",
-                       source_registry: dict[str, int] | None = None) -> tuple[str, str]:
+                       source_registry: dict[str, int] | None = None,
+                       intent: "UserIntent | None" = None) -> tuple[str, str]:
     rag_section = ""
     if rag_context:
         rag_section = f"""
@@ -1230,7 +1418,7 @@ Görevin: sana verilen analizleri tek bir bütünlüklü akademik araştırma ma
 olarak yazmak. Çıktı, doğrudan bir akademik dergiye gönderilebilecek kalitede
 olmalıdır.
 
-{_CORE_RULES}
+{_make_core_rules(intent)}
 
 ZORUNLU MAKALE YAPISI (Markdown başlıkları, başka başlık ekleme):
 # Araştırma Raporu
@@ -1252,38 +1440,111 @@ Makale sonundaki ## Kaynakça bölümünde kayıtlı tüm kaynaklar şu formatta
 [N] Başlık veya kısa açıklama. URL. (Erişim tarihi: {__import__('datetime').date.today()})
 Yalnızca metinde atıf yapılan kaynaklar listelenir; gereksiz kaynak eklenmez.
 
-Rapor dili: {language}\
+Rapor dili: {language}
+
+YANIT FORMATI — KESİNLİKLE UYULMALI:
+Yanıtını yalnızca geçerli bir JSON nesnesi olarak döndür.
+JSON dışında hiçbir şey yazma; açıklama, giriş veya ``` bloğu KULLANMA.
+
+Başarılı rapor:
+{{"is_final_report": true, "report": "<Markdown makale>"}}
+
+Tamamlanamama durumu:
+{{"is_final_report": false, "message": "<neden>", "needed_input": "<kullanıcıdan ne istiyorsun>"}}\
 """
 
-    json_footer = (
-        "\n\n" +
-        "ÇIKTI FORMATI — BUNU KESINLIKLE UY, İSTİSNASIZ:\r\n"
-        "Yanıtının ilk karakteri { olmalı, son karakteri } olmalı.\r\n"
-        "Önce veya sonra HİÇBİR metin, açıklama veya ``` bloğu YAZMA.\r\n"
-        "Yalnızca şu iki JSON formundan biri:\r\n"
-        '  Başarılı: {"is_final_report": true, "report": "# Araştırma Raporu\\n..."}\r\n'
-        '  Tamamlanamama: {"is_final_report": false, "message": "...", "needed_input": "..."}\r\n'
-    )
-    # RAG modunda all_outputs boştur; user prompt buna göre şekillendirilir.
-    if all_outputs.strip():
-        user = (
-            f"{n_batches} araştırma döngüsünden elde edilmiş analizler"
-            f" ({n_sources} kaynak, {n_chars} karakter).\n"
-            f"Bu analizleri yukarıdaki yapıda, tam atıflı akademik bir makaleye dönüştür.\n"
-            f"{registry_block}{qa_section}{rag_section}"
-            f"---\n{all_outputs}"
-            + json_footer
+    user = f"""\
+{n_batches} araştırma döngüsünden elde edilmiş analizler ({n_sources} kaynak, {n_chars} karakter).
+Bu analizleri yukarıdaki yapıda, tam atıflı akademik bir makaleye dönüştür.
+{registry_block}{qa_section}{rag_section}
+---
+{all_outputs}\
+"""
+    return system, user
+
+
+def build_rag_final_prompt(
+    n_sources: int,
+    rag_context: str,
+    language: str,
+    user_answers: str = "",
+    source_registry: dict[str, int] | None = None,
+    intent: "UserIntent | None" = None,
+) -> tuple[str, str]:
+    """
+    RAG moduna özgü final rapor promptu.
+    Girdi olarak batch analizi değil, doğrudan retrieval edilen ham chunk'lar kullanılır.
+    """
+    qa_section = ""
+    if user_answers:
+        qa_section = f"""
+KULLANICI CEVAPLARI (clarification fazından — öncelikli kaynak olarak kullan):
+
+{user_answers}
+
+---
+"""
+    registry_block = ""
+    if source_registry:
+        lines = "\n".join(
+            f"  [{num}] {url}"
+            for url, num in sorted(source_registry.items(), key=lambda x: x[1])
         )
-    else:
-        # RAG modu: tüm içerik RAG chunk'larından geliyor
-        user = (
-            f"{n_sources} web kaynağından toplanan içerik RAG deposuna yüklendi"
-            f" ({n_chars} karakter).\n"
-            f"Aşağıdaki RAG chunk'larını kullanarak yukarıdaki yapıda,"
-            f" tam atıflı akademik bir makale yaz.\n"
-            f"{registry_block}{qa_section}{rag_section}"
-            + json_footer
-        )
+        registry_block = f"""
+KAYNAK SİCİLİ ({len(source_registry)} kaynak — makale boyunca [N] formatında atıf yapılır):
+{lines}
+
+---
+"""
+
+    system = f"""\
+Sen uluslararası hakemli bir dergiye makale yazan kıdemli bir araştırmacısın.
+Sana {n_sources} farklı kaynaktan retrieval edilmiş ham içerik verilecek.
+Görevin: bu içerikleri sentezleyerek tek bir bütünlüklü akademik araştırma makalesi
+yazmak. Çıktı, doğrudan bir akademik dergiye gönderilebilecek kalitede olmalıdır.
+
+{_make_core_rules(intent)}
+
+ZORUNLU MAKALE YAPISI (Markdown başlıkları, başka başlık ekleme):
+# Araştırma Raporu
+## 1. Abstract
+## 2. Giriş
+## 3. Literatür Sentezi
+## 4. Teknik Mimari Analiz
+## 5. Bulgular
+## 6. Tartışma
+## 7. Sonuç
+## Kaynakça
+
+Her bölüm en az iki dolu paragraf içerir. Ham kaynak chunk'larını birer birer
+özetleme; bunları sentezleyerek tutarlı bir argüman akışı oluştur. Kısa ve yüzeysel
+cümleler yerine, iddiayı kuran ve kanıtla destekleyen uzun, yoğun cümleler yaz.
+
+KAYNAKÇA BÖLÜMÜ:
+[N] Başlık veya kısa açıklama. URL. (Erişim tarihi: {__import__('datetime').date.today()})
+Yalnızca metinde atıf yapılan kaynaklar listelenir.
+
+Rapor dili: {language}
+
+YANIT FORMATI — KESİNLİKLE UYULMALI:
+Yanıtını yalnızca geçerli bir JSON nesnesi olarak döndür.
+JSON dışında hiçbir şey yazma; açıklama, giriş veya ``` bloğu KULLANMA.
+
+Başarılı rapor:
+{{"is_final_report": true, "report": "<Markdown makale>"}}
+
+Tamamlanamama durumu:
+{{"is_final_report": false, "message": "<neden>", "needed_input": "<ne istiyorsun>"}}\
+"""
+
+    user = f"""\
+{n_sources} kaynaktan retrieval edilen içerik aşağıdadır.
+Bu chunk'ları sentezleyerek yukarıdaki yapıda tam atıflı akademik bir makale yaz.
+{registry_block}{qa_section}
+---
+RAG İÇERİĞİ:
+{rag_context}\
+"""
     return system, user
 
 
@@ -1292,61 +1553,34 @@ def build_clarification_prompt(
     n_sources: int,
     all_outputs: str,
     language: str,
-    rag_mode: bool = False,
 ) -> tuple[str, str]:
     """
     Modelden final raporu yazmadan önce ihtiyaç duyduğu soruları istemesi için kullanılır.
     _CORE_RULES'daki 'soru sorma yasağı' bu prompt için UYGULANMAZ — çünkü görevin
     kendisi soru üretmektir.
     """
-    if rag_mode:
-        kaynak_tanimi = (
-            f"{n_sources} web kaynağından toplanan içerik RAG deposuna yüklendi. "
-            f"Sana bu kaynakların en ilgili bölümleri chunk olarak verilecek."
-        )
-    else:
-        kaynak_tanimi = (
-            f"{n_batches} araştırma döngüsünden ({n_sources} kaynak) derlenen "
-            f"batch analizleri verilecek."
-        )
-
     system = f"""\
-Sen bir araştırma raporu yazım asistanısın.
-Görevin: kullanıcının {n_sources} kaynaktan derlenen içeriği üzerinden
-bir akademik rapor yazılmasına yardımcı olmak.
-
-İçerikleri okuduktan sonra, raporu DAHA İYİ yazmak için kullanıcının
-TERCİHLERİNİ ve NİYETİNİ anlamaya yönelik sorular sor.
-
-SORULMASI UYGUN SORU TİPLERİ (bunlarla sınırlı kalma, ama bunlar iyi örnekler):
-- Raporun hedef kitlesi kim? (akademisyen, sektör uzmanı, genel okuyucu...)
-- Özellikle vurgulanmasını istediğin bir konu veya perspektif var mı?
-- Raporun tonu nasıl olsun? (teknik, açıklayıcı, eleştirel...)
-- Belirli bir kullanım amacı var mı? (yayın, sunum, iç rapor...)
-- Kaynaklar arasında öncelik verilmesini istediğin var mı?
-
-KESINLIKLE SORMA:
-- Kaynaklarda zaten mevcut olan teknik/akademik bilgileri
-- Araştırma sorularını veya hipotezleri (bunları sen çıkaracaksın)
-- İçeriklerin doğruluğunu teyit eden sorular
+Sen kıdemli bir akademik araştırma editörüsün.
+Sana {n_batches} araştırma döngüsünden ({n_sources} kaynak) derlenen analizler verilecek.
+Bu analizleri okuyacak ve ardından yazacağın akademik final raporu için eksik gördüğün
+bilgileri kullanıcıya sorular hâlinde ileteceksin.
 
 KURALLAR:
-- Soru sayısı en fazla 4 olmalı; kısa ve net sorular sor.
-- Her sorunun amacını bir cümleyle açıkla.
-- Eğer içerik zaten yeterince yönlendirici ise soru sormana gerek yok.
+- Yalnızca gerçekten belirsiz veya eksik olan noktaları sor; analizlerden çıkarılabilecek
+  bilgileri sorma.
+- Soru sayısı en fazla 7 olmalı; önemine göre sırala (en kritik önce).
+- Her sorunun neden sorulduğunu kısaca açıkla (1 cümle).
+- Akademik, nesnel ton kullan.
 
 YANIT FORMATI — sadece geçerli JSON, başka hiçbir şey:
 {{"questions": [{{"id": 1, "question": "...", "why": "..."}}]}}
 
-Eğer ek bilgiye gerek yoksa boş liste döndür: {{"questions": []}}
-
 Rapor dili: {language}\
 """
 
-    content_label = "RAG chunk'ları" if rag_mode else f"{n_batches} batch analizi"
     user = f"""\
-Aşağıdaki {content_label}ni oku ve raporu kullanıcının ihtiyacına göre
-şekillendirmek için gerekli TERCİH ve NİYET sorularını belirle.
+Aşağıdaki {n_batches} batch analizini oku ve final akademik raporu en iyi şekilde
+yazabilmek için kullanıcıya sormak istediğin soruları belirle.
 
 ---
 {all_outputs}\
@@ -1407,12 +1641,13 @@ def collect_user_answers(questions: list[dict], language: str) -> str:
     return "KULLANICI CEVAPLARI:\n\n" + "\n\n".join(qa_pairs)
 
 
-def build_thematic_cluster_prompt(batch_analyses: list[str], language: str) -> tuple[str, str]:
+def build_thematic_cluster_prompt(batch_analyses: list[str], language: str,
+                                   intent: "UserIntent | None" = None) -> tuple[str, str]:
     system = f"""\
 Sen bir araştırma editörüsün.
 Görevin: batch analizlerini tematik gruplara ayırmak ve sonucu JSON olarak döndürmek.
 
-{_CORE_RULES}
+{_make_core_rules(intent)}
 
 GRUPLAMA KURALLARI:
 Grup sayısı 2–7 arasında olmalı; içeriğe göre doğal belirle.
@@ -1441,13 +1676,14 @@ def build_cluster_synthesis_prompt(
     description: str,
     cluster_analyses: list[str],
     language: str,
+    intent: "UserIntent | None" = None,
 ) -> tuple[str, str]:
     system = f"""\
 Sen uluslararası hakemli bir dergiye makale yazan kıdemli bir araştırmacısın.
 Görevin: sana verilen batch analizlerini tek bir tematik bölüm olarak yazmak.
 Bu bölüm, daha büyük bir araştırma makalesine entegre edilecektir.
 
-{_CORE_RULES}
+{_make_core_rules(intent)}
 
 ZORUNLU YAPI (Markdown, başka başlık ekleme):
 ## {theme}
@@ -1535,6 +1771,8 @@ def run_agent(
     rag_embedding_model: str = "all-MiniLM-L6-v2",
     # ── Clarification parametresi ──────────────────────────────────────────
     clarification: bool      = True,
+    # ── Kullanıcı niyeti ───────────────────────────────────────────────────
+    intent: "UserIntent | None" = None,
 ):
     stats = Stats()
 
@@ -1670,31 +1908,46 @@ def run_agent(
             log.warning("Bu batch için hiç içerik alınamadı — atlanıyor.")
             continue
 
-        # ── RAG modu: LLM analizi YOK, sadece fetch + indeksleme ────────────
+        # ── RAG MODU: LLM analizi atla, sadece depola ───────────────────────
         if rag_store is not None:
+            # Sayfa linklerini otomatik kuyruğa ekle (LLM'in LINK_REQUEST'i yok)
+            auto_added = 0
+            for plinks in all_page_links.values():
+                for lurl in plinks:
+                    if (lurl not in processed and lurl not in queue
+                            and auto_added < max_extra_links):
+                        queue.append(lurl)
+                        auto_added += 1
+                        stats.total_linked_urls += 1
+            if auto_added:
+                log.info(
+                    f"[bright_yellow]RAG:[/bright_yellow] "
+                    f"{auto_added} sayfa linki otomatik kuyruğa eklendi.",
+                    i=1,
+                )
+
             batch_secs = time.time() - batch_t0
             bdata = {
                 "batch": batch_no, "urls": batch,
                 "fetched": batch_fetched, "failed": batch_failed,
                 "chars": batch_chars,
-                "link_reqs": 0,
-                "new_urls": 0,
+                "link_reqs": 0, "new_urls": auto_added,
                 "llm_secs": 0.0,
                 "secs": round(batch_secs, 2),
-                "analysis": "",
+                "analysis": "",        # RAG modunda LLM analizi yok
             }
             all_batch_data.append(bdata)
             stats.batch_stats.append(bdata)
             stats.batches_done += 1
             log.success(
-                f"Batch {batch_no} indekslendi  [dim]({batch_secs:.1f}s)[/dim]  ·  "
-                f"kuyrukta [bright_white]{len(queue)}[/bright_white] URL kaldı  ·  "
-                f"toplam geçen: [dim]{stats.elapsed()}[/dim]"
+                f"Batch {batch_no} depolandı  [dim]({batch_secs:.1f}s)[/dim]  ·  "
+                f"kuyrukta [bright_white]{len(queue)}[/bright_white] URL kaldı"
             )
             if delay > 0 and queue:
                 time.sleep(delay)
-            continue
+            continue          # ← LLM analizi bloğunu atla
 
+        # ── NORMAL MOD: LLM Batch Analizi ────────────────────────────────────
         log.rule("LLM Analiz", style="bright_magenta")
 
         chunk = "\n\n---\n\n".join(texts)
@@ -1704,7 +1957,8 @@ def run_agent(
 
         result = ask_llm(
             build_analysis_prompt(chunk, language,
-                                  source_index=batch_source_index),
+                                  source_index=batch_source_index,
+                                  intent=intent),
             cfg, stats,
         )
         history.append(result)
@@ -1772,26 +2026,24 @@ def run_agent(
             time.sleep(delay)
 
     # ── FINAL RAPOR ────────────────────────────────────────────────────────────
-    # RAG modunda history boştur (batch LLM analizi yapılmaz); bu normaldir.
     if not history and rag_store is None:
         log.error("Hiçbir içerik işlenemedi — çıkılıyor.")
         sys.exit(1)
 
     if rag_store is not None and stats.total_fetched == 0:
-        log.error("Hiçbir URL fetch edilemedi — çıkılıyor.")
+        log.error("RAG deposu boş — hiçbir URL getirilemedi.")
         sys.exit(1)
 
     log.section("FINAL RAPOR", style="bold bright_green")
 
-    # ── Tematik Sentez (isteğe bağlı, batch sayısı > 3 ise önerilir) ──────────
-    # RAG modunda history yoktur; tematik sentez atlanır.
-    if thematic_synthesis and len(history) >= 2:
+    # ── Tematik Sentez (normal mod, batch sayısı ≥ 2) ─────────────────────────
+    if thematic_synthesis and len(history) >= 2 and rag_store is None:
         log.step(
             f"Tematik gruplama başlıyor  ·  "
             f"{len(history)} batch analizi sınıflandırılıyor…"
         )
 
-        cluster_prompt = build_thematic_cluster_prompt(history, language)
+        cluster_prompt = build_thematic_cluster_prompt(history, language, intent=intent)
         raw_clusters   = ask_llm(cluster_prompt, cfg, stats)
 
         # JSON parse
@@ -1856,7 +2108,7 @@ def run_agent(
                 )
 
                 synth_prompt = build_cluster_synthesis_prompt(
-                    theme, description, valid_analyses, language
+                    theme, description, valid_analyses, language, intent=intent
                 )
                 synthesis = ask_llm(synth_prompt, cfg, stats)
                 cluster_syntheses.append(synthesis)
@@ -1880,23 +2132,13 @@ def run_agent(
     else:
         # Tematik sentez kapalı veya batch sayısı yetersiz
         synthesis_input = "\n\n".join(history)
-        if history:
-            log.step(
-                f"{stats.batches_done} batch, "
-                f"{stats.total_fetched} kaynak, "
-                f"{stats.total_chars:,} karakter birleştiriliyor…"
-            )
-        else:
-            # RAG modu: batch analizi olmadığından synthesis_input boştur;
-            # tüm içerik RAG deposundan retrieve edilecek.
-            log.step(
-                f"RAG modu: {stats.total_fetched} kaynak fetch edildi, "
-                f"{stats.total_chars:,} karakter indekslendi — "
-                f"final rapor RAG retrieve ile oluşturulacak."
-            )
+        log.step(
+            f"{stats.batches_done} batch, "
+            f"{stats.total_fetched} kaynak, "
+            f"{stats.total_chars:,} karakter birleştiriliyor…"
+        )
 
-    # ── RAG: final rapor için tüm vektör deposundan ilgili bölümler al ──────
-    final_rag_ctx = ""
+    # ── RAG MODU: multi-query retrieval ile final içerik oluştur ─────────────
     if rag_store is not None:
         rs = rag_store.rag_stats()
         log.info(
@@ -1904,20 +2146,35 @@ def run_agent(
             f"{rs['chunk_sayisi']} chunk  ·  "
             f"[dim]embedding: {rs['embedding_tipi']}[/dim]"
         )
-        # Sorgu: history varsa ilk batch'lerden, yoksa kaynak URL listesini kullan
-        if history:
-            final_query = "\n\n".join(history[:3])[:3000]
-        else:
-            # RAG modu: URL başlıklarını sorgu olarak kullan
-            final_query = " ".join(list(source_registry.keys())[:20])
-        final_hits    = rag_store.query(final_query, top_k=rag_top_k * 2)
-        final_rag_ctx = rag_store.format_context(final_hits)
-        if final_rag_ctx:
-            log.info(
-                f"[bright_yellow]RAG:[/bright_yellow] final rapor için "
-                f"{len(final_hits)} chunk retrieval edildi",
-                i=1,
-            )
+
+        # Rapor bölümleriyle eşleşen çok yönlü sorgular
+        rag_queries = [
+            "teknik mimari sistem tasarımı algoritma",
+            "metodoloji araştırma yöntemi yaklaşım",
+            "temel bulgular deneysel sonuçlar performans",
+            "karşılaştırmalı analiz değerlendirme kıyaslama",
+            "sınırlılıklar açık problemler gelecek çalışma",
+            "literatür arka plan teorik çerçeve",
+        ]
+
+        all_hits: list[dict] = []
+        seen_keys: set[tuple] = set()
+        for q in rag_queries:
+            for hit in rag_store.query(q, top_k=rag_top_k):
+                key = (hit["url"], hit["text"][:80])
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_hits.append(hit)
+
+        # Skora göre sırala ve en iyi chunk'ları al
+        all_hits.sort(key=lambda h: h["score"], reverse=True)
+        synthesis_input = rag_store.format_context(all_hits)
+        log.info(
+            f"[bright_yellow]RAG:[/bright_yellow] "
+            f"{len(all_hits)} chunk retrieval edildi "
+            f"({len(rag_queries)} farklı sorgu)",
+            i=1,
+        )
 
     # ── CLARIFICATION: model ne bilmesi gerektiğini sorar ─────────────────
     user_qa_block = ""
@@ -1927,14 +2184,11 @@ def run_agent(
             "Model, final raporu yazmadan önce eksik noktaları belirliyor…"
         )
 
-        # RAG modunda synthesis_input boştur; clarification için RAG bağlamını kullan
-        clar_all_outputs = synthesis_input if synthesis_input else final_rag_ctx
         clar_prompt = build_clarification_prompt(
             n_batches   = stats.batches_done,
             n_sources   = stats.total_fetched,
-            all_outputs = clar_all_outputs,
+            all_outputs = synthesis_input[:6000],   # özet kısım yeter
             language    = language,
-            rag_mode    = (rag_store is not None),
         )
         raw_clar = ask_llm(clar_prompt, cfg, stats)
 
@@ -1970,16 +2224,29 @@ def run_agent(
             )
 
     # ── Final LLM Çağrısı ─────────────────────────────────────────────────────
-    final_prompt = build_final_prompt(
-        n_batches=stats.batches_done,
-        n_sources=stats.total_fetched,
-        n_chars=f"{stats.total_chars:,}",
-        all_outputs=synthesis_input,
-        language=language,
-        rag_context=final_rag_ctx,
-        user_answers=user_qa_block,
-        source_registry=source_registry,
-    )
+    if rag_store is not None:
+        # RAG modu: retrieval chunk'larından direkt rapor
+        final_prompt = build_rag_final_prompt(
+            n_sources       = stats.total_fetched,
+            rag_context     = synthesis_input,
+            language        = language,
+            user_answers    = user_qa_block,
+            source_registry = source_registry,
+            intent          = intent,
+        )
+    else:
+        # Normal mod: batch analizlerinden rapor
+        final_prompt = build_final_prompt(
+            n_batches       = stats.batches_done,
+            n_sources       = stats.total_fetched,
+            n_chars         = f"{stats.total_chars:,}",
+            all_outputs     = synthesis_input,
+            language        = language,
+            rag_context     = "",
+            user_answers    = user_qa_block,
+            source_registry = source_registry,
+            intent          = intent,
+        )
 
     MAX_FINAL_RETRIES = 3
     final_text = None
@@ -2045,16 +2312,27 @@ def run_agent(
                     # Mevcut clarification cevaplarına retry girdisini de ekle
                     combined_qa = "\n\n".join(filter(None, [user_qa_block,
                                                             f"RETRY EK BİLGİSİ:\n{user_input}"]))
-                    final_prompt = build_final_prompt(
-                        n_batches=stats.batches_done,
-                        n_sources=stats.total_fetched,
-                        n_chars=f"{stats.total_chars:,}",
-                        all_outputs="\n\n".join(history),
-                        language=language,
-                        rag_context=final_rag_ctx,
-                        user_answers=combined_qa,
-                        source_registry=source_registry,
-                    )
+                    if rag_store is not None:
+                        final_prompt = build_rag_final_prompt(
+                            n_sources       = stats.total_fetched,
+                            rag_context     = synthesis_input,
+                            language        = language,
+                            user_answers    = combined_qa,
+                            source_registry = source_registry,
+                            intent          = intent,
+                        )
+                    else:
+                        final_prompt = build_final_prompt(
+                            n_batches       = stats.batches_done,
+                            n_sources       = stats.total_fetched,
+                            n_chars         = f"{stats.total_chars:,}",
+                            all_outputs     = "\n\n".join(history),
+                            language        = language,
+                            rag_context     = "",
+                            user_answers    = combined_qa,
+                            source_registry = source_registry,
+                            intent          = intent,
+                        )
                 else:
                     log.warning("Kullanıcı girdi vermedi — bir sonraki denemeye geçiliyor.")
 
@@ -2221,6 +2499,24 @@ def build_parser():
         ),
     )
 
+    pi = p.add_argument_group("🎯 Başlangıç Promptu")
+    pi.add_argument(
+        "--prompt", metavar="TOPIC",
+        help=(
+            "Araştırma konusunu doğrudan belirt; interaktif giriş ekranını atlar. "
+            "Örnek: --prompt \"Transformer modelleri ile protein yapı tahmini\""
+        ),
+    )
+    pi.add_argument(
+        "--no-prompt", dest="no_prompt",
+        action="store_true", default=False,
+        help=(
+            "Kullanıcı giriş ekranını tamamen atla. "
+            "CI/pipe/otomatik çalıştırma için kullanın. "
+            "Varsayılan: giriş ekranı açık."
+        ),
+    )
+
     out = p.add_argument_group("💾 Çıktı")
     out.add_argument("--output", "-o", default="rapor.pdf", metavar="FILE",
                      help="Çıktı dosyası (varsayılan: rapor.pdf)")
@@ -2321,6 +2617,20 @@ def main():
 
     urls = load_urls(args)
 
+    # ── Kullanıcı niyeti toplama ───────────────────────────────────────────────
+    intent: UserIntent | None = None
+    if not args.no_prompt:
+        intent = collect_user_intent(preset_topic=args.prompt or "")
+    elif args.prompt:
+        # --no-prompt + --prompt: sadece konuyu kaydet, ekran gösterme
+        intent = UserIntent(
+            topic       = args.prompt,
+            output_type = "Akademik Makale",
+            audience    = "",
+            focus       = "",
+            constraints = "",
+        )
+
     run_agent(
         initial_urls=urls,
         cfg=cfg,
@@ -2340,6 +2650,7 @@ def main():
         rag_top_k=args.rag_top_k,
         rag_embedding_model=args.rag_embedding_model,
         clarification=not args.no_clarification,
+        intent=intent,
     )
 
 
