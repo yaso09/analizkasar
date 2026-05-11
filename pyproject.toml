@@ -1,0 +1,59 @@
+[project]
+name = "analizkasar"
+version = "0.1.0"
+description = "Iterative Web Research & LLM Synthesis"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "python-docx>=1.1.0",
+    "rich>=13.7.0",
+    "reportlab>=4.2.0",
+]
+
+[project.optional-dependencies]
+# LLM backend'leri â€” sadece kullandÄ±ÄŸÄ±nÄ± kur
+openai    = ["openai>=1.30.0"]
+anthropic = ["anthropic>=0.28.0"]
+groq      = ["groq>=0.9.0"]
+ollama    = ["ollama>=0.2.0"]
+
+# RAG desteği (--rag bayrağı için)
+rag = [
+    "numpy>=1.26.0",
+    "sentence-transformers>=3.1.0",
+]
+
+# TÃ¼m backend'ler + RAG (geliştirme ortamı)
+all = [
+    "openai>=1.30.0",
+    "anthropic>=0.28.0",
+    "groq>=0.9.0",
+    "ollama>=0.2.0",
+    "numpy>=1.26.0",
+    "sentence-transformers>=3.1.0",
+]
+
+[project.scripts]
+analizkasar = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.5.0",
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]   # uzun satırlar kabul (prompt stringleri)

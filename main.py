@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -246,6 +247,54 @@ class UserIntent:
             lines.append(f"  Odak Noktaları : {self.focus}")
         if self.constraints.strip():
             lines.append(f"  Kısıtlar       : {self.constraints}")
+        return "\n".join(lines)
+
+
+@dataclass
+class ResearchStep:
+    """Araştırma planındaki tek bir adımı temsil eder."""
+    step_no:     int
+    title:       str
+    goal:        str
+    focus_areas: list[str]
+    result:      str = field(default="")
+
+    def header(self) -> str:
+        return f"## Adım {self.step_no}: {self.title}"
+
+    def to_result_block(self) -> str:
+        if not self.result:
+            return ""
+        return f"{self.header()}\n{self.result}"
+
+
+@dataclass
+class ResearchPlan:
+    """LLM tarafından oluşturulan yapılandırılmış araştırma planı."""
+    research_question: str
+    steps: list[ResearchStep]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResearchPlan":
+        steps = [
+            ResearchStep(
+                step_no     = s.get("step_no", i + 1),
+                title       = s.get("title", f"Adım {i + 1}"),
+                goal        = s.get("goal", ""),
+                focus_areas = s.get("focus_areas", []),
+            )
+            for i, s in enumerate(d.get("steps", []))
+        ]
+        return cls(
+            research_question = d.get("research_question", ""),
+            steps             = steps,
+        )
+
+    def summary_table(self) -> str:
+        lines = [f"Araştırma Sorusu: {self.research_question}", ""]
+        for s in self.steps:
+            areas = ", ".join(s.focus_areas[:3])
+            lines.append(f"  Adım {s.step_no}: {s.title}  [dim]— {areas}[/dim]")
         return "\n".join(lines)
 
 
@@ -1295,6 +1344,166 @@ Aşağıdaki kurallar mutlaktır ve tek istisnası yoktur.
 """
 
 
+def build_plan_prompt(
+    intent: "UserIntent",
+    n_sources: int,
+    language: str,
+    max_steps: int = 5,
+) -> tuple[str, str]:
+    """
+    LLM'den kullanıcı niyetine göre yapılandırılmış bir araştırma planı oluşturmasını ister.
+    Her adımın odak noktası, hedefi ve önceki adımlarla bağlantısı açıkça tanımlanır.
+    """
+    system = f"""\
+Sen deneyimli bir araştırma metodolojisti ve editörüsün.
+Kullanıcının araştırma niyetini ve mevcut kaynak sayısını analiz ederek
+araştırmayı en verimli şekilde yürütecek adım adım bir plan oluşturacaksın.
+
+PLAN KURALLARI:
+- Adım sayısı 2 ile {max_steps} arasında olmalı; konu karmaşıklığına göre belirle.
+- Her adım tek bir odak alanını derinlemesine ele alır; birden fazla konu bir adıma sıkıştırılmaz.
+- Adımlar mantıksal sırayla dizilmeli: temel kavramlar → teknik analiz → karşılaştırma → sentez.
+- Her adımın focus_areas listesi 2–4 somut sorudan oluşur.
+- research_question: kullanıcı niyetinden türetilen tek cümlelik araştırma sorusu.
+
+YANIT FORMATI — yalnızca geçerli JSON, başka hiçbir şey:
+{{
+  "research_question": "...",
+  "steps": [
+    {{
+      "step_no": 1,
+      "title": "Kısa adım başlığı",
+      "goal": "Bu adımda ne öğrenilecek (1 cümle)",
+      "focus_areas": ["Odak 1", "Odak 2", "Odak 3"]
+    }}
+  ]
+}}
+
+Dil: {language}\
+"""
+    intent_block = intent.to_prompt_block() if intent and not intent.is_empty() else ""
+    user = f"""\
+{intent_block}
+
+Mevcut kaynak sayısı: {n_sources}
+
+Bu araştırma için {max_steps} adıma kadar bir plan oluştur.\
+"""
+    return system, user
+
+
+def build_step_analysis_prompt(
+    step: "ResearchStep",
+    plan: "ResearchPlan",
+    prev_results: list[str],
+    content: str,
+    intent: "UserIntent | None",
+    language: str,
+    source_index: dict[str, int] | None = None,
+) -> tuple[str, str]:
+    """
+    Araştırma planındaki tek bir adım için analiz promptu.
+    Önceki adımların sonuçlarını bağlam olarak alır; odağı daraltılmış analiz üretir.
+    """
+    _CORE = _make_core_rules(intent)
+
+    prev_block = ""
+    if prev_results:
+        prev_block = "ÖNCEKİ ADIM SONUÇLARI (bağlam için):\n"
+        for i, r in enumerate(prev_results, 1):
+            prev_block += f"\n--- Adım {i} ---\n{r[:800]}\n"
+        prev_block += "\n---\n"
+
+    focus_list = "\n".join(f"  - {f}" for f in step.focus_areas)
+
+    src_block = ""
+    if source_index:
+        lines = "\n".join(f"  K:{num}  {url}" for url, num in
+                          sorted(source_index.items(), key=lambda x: x[1]))
+        src_block = f"KAYNAK İNDEKSİ:\n{lines}\n\n"
+
+    system = f"""\
+Sen otonom çalışan bir araştırma yapay zekâsısın.
+Şu an {plan.research_question!r} sorusunu araştıran {len(plan.steps)} adımlık
+bir planın {step.step_no}. adımını yürütüyorsun.
+
+{_CORE}
+
+BU ADIMIN AMACI: {step.goal}
+
+ODAK NOKTALARI (yalnızca bunlara cevap ara, başka konulara girme):
+{focus_list}
+
+ÇIKTI YAPISI (paragraf olarak yaz, madde listesi yasak):
+## {step.title}
+### Bulgular
+### Önceki Adımlarla Bağlantı
+### Yanıtsız Kalan Sorular
+
+Dil: {language}\
+"""
+
+    user = f"""\
+{prev_block}{src_block}
+KAYNAKLAR:
+{content}\
+"""
+    return system, user
+
+
+def build_critique_prompt(
+    plan: "ResearchPlan",
+    step_results: list[str],
+    intent: "UserIntent | None",
+    language: str,
+) -> tuple[str, str]:
+    """
+    Tüm adım sonuçlarını eleştirel gözle değerlendirir.
+    Güçlü yönleri, boşlukları ve final rapor için önerileri saptar.
+    """
+    intent_block = intent.to_prompt_block() + "\n\n" if intent and not intent.is_empty() else ""
+
+    steps_block = "\n\n".join(
+        f"=== ADIM {i+1}: {plan.steps[i].title} ===\n{r[:1200]}"
+        for i, r in enumerate(step_results)
+    )
+
+    system = f"""\
+Sen bağımsız bir araştırma değerlendiricisisin.
+{len(step_results)} adımlı bir araştırmanın sonuçlarını eleştirel olarak
+değerlendirecek ve final raporun kalitesini artıracak yönlendirmeler üreteceksin.
+
+GÖREV PROTOKOLÜ:
+- Bu bir değerlendirme görevi; sohbet veya teşekkür YOK.
+- Yalnızca adım sonuçlarında açıkça geçen bilgileri kullan.
+
+DEĞERLENDİRME ÇERÇEVESI (paragraf olarak yaz):
+## Genel Değerlendirme
+Araştırmanın bütünü kullanıcı niyetini ne ölçüde karşıladı?
+
+## Güçlü Yönler
+Hangi adımlar en zengin ve güvenilir bulguları üretti?
+
+## Boşluklar ve Zayıf Noktalar
+Yanıtsız kalan önemli sorular, yetersiz kapsanan alanlar neler?
+
+## Final Rapor İçin Öneriler
+Final raporu yazacak modele somut yönlendirmeler ver: hangi bölümler
+daha fazla önem almalı, hangi bağlantılar kurulmalı, hangi iddialar
+daha dikkatli ifade edilmeli?
+
+Dil: {language}\
+"""
+
+    user = f"""\
+{intent_block}Araştırma Sorusu: {plan.research_question}
+
+Adım Sonuçları:
+{steps_block}\
+"""
+    return system, user
+
+
 def build_analysis_prompt(chunk: str, language: str,
                           rag_context: str = "",
                           source_index: dict[str, int] | None = None,
@@ -1771,6 +1980,9 @@ def run_agent(
     rag_embedding_model: str = "all-MiniLM-L6-v2",
     # ── Clarification parametresi ──────────────────────────────────────────
     clarification: bool      = True,
+    # ── Multi-step parametreleri ───────────────────────────────────────────
+    multi_step: bool         = False,
+    max_steps: int           = 5,
     # ── Kullanıcı niyeti ───────────────────────────────────────────────────
     intent: "UserIntent | None" = None,
 ):
@@ -1791,6 +2003,7 @@ def run_agent(
     processed: set[str] = set()
     history: list[str]  = []
     all_batch_data: list[dict] = []
+    all_collected_texts: list[str] = []   # multi-step için tüm içerik biriktirilir
 
     # ── Kaynak sicili: URL → global atıf numarası (NotebookLM ilkesi) ─────────
     source_registry: dict[str, int] = {}
@@ -1908,8 +2121,10 @@ def run_agent(
             log.warning("Bu batch için hiç içerik alınamadı — atlanıyor.")
             continue
 
-        # ── RAG MODU: LLM analizi atla, sadece depola ───────────────────────
-        if rag_store is not None:
+        # ── RAG / MULTI-STEP MODU: LLM analizi atla, içeriği biriktir ───────
+        if rag_store is not None or multi_step:
+            all_collected_texts.extend(texts)   # multi-step için akümüle et
+
             # Sayfa linklerini otomatik kuyruğa ekle (LLM'in LINK_REQUEST'i yok)
             auto_added = 0
             for plinks in all_page_links.values():
@@ -1920,13 +2135,14 @@ def run_agent(
                         auto_added += 1
                         stats.total_linked_urls += 1
             if auto_added:
+                mode_tag = "[bright_yellow]RAG[/bright_yellow]" if rag_store else "[bright_magenta]Multi-Step[/bright_magenta]"
                 log.info(
-                    f"[bright_yellow]RAG:[/bright_yellow] "
-                    f"{auto_added} sayfa linki otomatik kuyruğa eklendi.",
+                    f"{mode_tag}: {auto_added} sayfa linki otomatik kuyruğa eklendi.",
                     i=1,
                 )
 
             batch_secs = time.time() - batch_t0
+            mode_label = "RAG" if rag_store else "Multi-Step"
             bdata = {
                 "batch": batch_no, "urls": batch,
                 "fetched": batch_fetched, "failed": batch_failed,
@@ -1934,13 +2150,14 @@ def run_agent(
                 "link_reqs": 0, "new_urls": auto_added,
                 "llm_secs": 0.0,
                 "secs": round(batch_secs, 2),
-                "analysis": "",        # RAG modunda LLM analizi yok
+                "analysis": "",
             }
             all_batch_data.append(bdata)
             stats.batch_stats.append(bdata)
             stats.batches_done += 1
             log.success(
-                f"Batch {batch_no} depolandı  [dim]({batch_secs:.1f}s)[/dim]  ·  "
+                f"Batch {batch_no} [{mode_label}] depolandı  "
+                f"[dim]({batch_secs:.1f}s)[/dim]  ·  "
                 f"kuyrukta [bright_white]{len(queue)}[/bright_white] URL kaldı"
             )
             if delay > 0 and queue:
@@ -2036,8 +2253,93 @@ def run_agent(
 
     log.section("FINAL RAPOR", style="bold bright_green")
 
-    # ── Tematik Sentez (normal mod, batch sayısı ≥ 2) ─────────────────────────
-    if thematic_synthesis and len(history) >= 2 and rag_store is None:
+    # ── MULTI-STEP: plan → adım yürütme → eleştiri ───────────────────────────
+    research_plan: "ResearchPlan | None" = None
+    critique_text: str = ""
+
+    if multi_step:
+        log.section("MULTI-STEP ARAŞTIRMA", style="bold bright_magenta")
+
+        # 1. Planlama
+        log.step("Araştırma planı oluşturuluyor…")
+        plan_prompt = build_plan_prompt(intent, stats.total_fetched, language, max_steps)
+        raw_plan    = ask_llm(plan_prompt, cfg, stats)
+
+        cleaned_plan = raw_plan.strip()
+        if cleaned_plan.startswith("```"):
+            cleaned_plan = re.sub(r'^```[a-zA-Z]*\n?', '', cleaned_plan)
+            cleaned_plan = re.sub(r'\n?```$',           '', cleaned_plan.strip())
+
+        try:
+            research_plan = ResearchPlan.from_dict(json.loads(cleaned_plan))
+        except (json.JSONDecodeError, KeyError) as e:
+            log.warning(f"[bright_yellow]Plan parse hatası ({e}) — tek adımlı moda geçiliyor.[/bright_yellow]")
+            research_plan = None
+
+        if research_plan and research_plan.steps:
+            # Planı göster
+            console.print(Panel(
+                research_plan.summary_table(),
+                title=f"[bold bright_magenta]📋 Araştırma Planı  ·  {len(research_plan.steps)} adım[/bold bright_magenta]",
+                border_style="bright_magenta",
+                padding=(0, 2),
+            ))
+            console.print()
+
+            # 2. Adım yürütme
+            prev_results: list[str] = []
+            full_content = "\n\n---\n\n".join(all_collected_texts)
+            # Context sınırı: adım başına max 40k karakter (model bağlam penceresini koru)
+            STEP_CONTENT_LIMIT = 40_000
+
+            for step in research_plan.steps:
+                log.section(
+                    f"Adım {step.step_no}/{len(research_plan.steps)}: {step.title}",
+                    style="bold bright_cyan",
+                )
+                log.step(step.goal)
+
+                if rag_store is not None:
+                    # RAG ile step odaklı retrieval
+                    q = step.goal + " " + " ".join(step.focus_areas)
+                    hits = rag_store.query(q, top_k=rag_top_k * 2)
+                    step_content = rag_store.format_context(hits)
+                    step_src_idx = None
+                    log.info(
+                        f"[bright_yellow]RAG:[/bright_yellow] {len(hits)} chunk retrieval edildi.",
+                        i=1,
+                    )
+                else:
+                    step_content = full_content[:STEP_CONTENT_LIMIT]
+                    step_src_idx = source_registry
+
+                step_prompt = build_step_analysis_prompt(
+                    step        = step,
+                    plan        = research_plan,
+                    prev_results= prev_results,
+                    content     = step_content,
+                    intent      = intent,
+                    language    = language,
+                    source_index= step_src_idx,
+                )
+                step.result = ask_llm(step_prompt, cfg, stats)
+                prev_results.append(step.result)
+                history.append(step.result)
+                log.success(f"Adım {step.step_no} tamamlandı.")
+
+            # 3. Eleştiri
+            log.section("ELEŞTİRİ & BOŞLUK ANALİZİ", style="bold bright_yellow")
+            critique_prompt = build_critique_prompt(
+                plan         = research_plan,
+                step_results = [s.result for s in research_plan.steps],
+                intent       = intent,
+                language     = language,
+            )
+            critique_text = ask_llm(critique_prompt, cfg, stats)
+            log.success("Eleştiri tamamlandı.")
+
+    # ── Tematik Sentez (normal mod: RAG yok, multi-step yok, batch ≥ 2) ────────
+    if thematic_synthesis and len(history) >= 2 and rag_store is None and not multi_step:
         log.step(
             f"Tematik gruplama başlıyor  ·  "
             f"{len(history)} batch analizi sınıflandırılıyor…"
@@ -2136,6 +2438,16 @@ def run_agent(
             f"{stats.batches_done} batch, "
             f"{stats.total_fetched} kaynak, "
             f"{stats.total_chars:,} karakter birleştiriliyor…"
+        )
+
+    # ── Multi-step: synthesis_input'u adım sonuçları + eleştiri olarak yeniden oluştur
+    if multi_step and research_plan and research_plan.steps:
+        step_blocks = [s.to_result_block() for s in research_plan.steps if s.result]
+        if critique_text:
+            step_blocks.append(f"## Eleştiri ve Boşluk Analizi\n{critique_text}")
+        synthesis_input = "\n\n".join(step_blocks)
+        log.step(
+            f"{len(research_plan.steps)} adım + eleştiri final rapora aktarılıyor…"
         )
 
     # ── RAG MODU: multi-query retrieval ile final içerik oluştur ─────────────
@@ -2517,6 +2829,21 @@ def build_parser():
         ),
     )
 
+    ms = p.add_argument_group("🔬 Multi-Step Araştırma")
+    ms.add_argument(
+        "--multi-step", dest="multi_step",
+        action="store_true", default=False,
+        help=(
+            "Multi-step araştırma modunu etkinleştir: LLM önce bir araştırma planı "
+            "oluşturur, her adımı bağımsız olarak yürütür, ardından eleştiri + boşluk "
+            "analizi yaparak final raporu üretir. (varsayılan: kapalı)"
+        ),
+    )
+    ms.add_argument(
+        "--max-steps", type=int, default=5, metavar="N",
+        help="Araştırma planındaki maksimum adım sayısı (varsayılan: 5, aralık: 2–10)",
+    )
+
     out = p.add_argument_group("💾 Çıktı")
     out.add_argument("--output", "-o", default="rapor.pdf", metavar="FILE",
                      help="Çıktı dosyası (varsayılan: rapor.pdf)")
@@ -2650,6 +2977,8 @@ def main():
         rag_top_k=args.rag_top_k,
         rag_embedding_model=args.rag_embedding_model,
         clarification=not args.no_clarification,
+        multi_step=args.multi_step,
+        max_steps=max(2, min(10, args.max_steps)),
         intent=intent,
     )
 
